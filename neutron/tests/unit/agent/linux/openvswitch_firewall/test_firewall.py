@@ -944,6 +944,52 @@ class TestOVSFirewallDriver(base.BaseTestCase):
         self.mock_bridge.br.delete_flows.assert_has_calls(
             [flow1, flow2, flow3, flow6, flow7, flow8, flow4, flow5])
 
+    def test_initialize_port_flows_egress_direct_allowed_address_pairs(self):
+        cfg.CONF.set_override('explicitly_egress_direct', True, 'AGENT')
+        port_dict = {
+            'device': 'port-id',
+            'security_groups': [1],
+            'allowed_address_pairs': [
+                {'mac_address': '00:00:00:00:00:11',
+                 'ip_address': '192.168.0.1'}]}
+        of_port = create_ofport(port_dict,
+                                network_type=constants.TYPE_VLAN,
+                                physical_network='physnet1')
+
+        with mock.patch.object(
+                self.firewall,
+                'install_accepted_egress_direct_flow') as m_install:
+            self.firewall.initialize_port_flows(of_port)
+
+        expected_calls = [
+            mock.call(mac_addr, of_port.vlan_tag, of_port.ofport,
+                      tunnel_direct_info=mock.ANY)
+            for mac_addr in of_port.all_allowed_macs]
+        m_install.assert_has_calls(expected_calls, any_order=True)
+        self.assertEqual(len(of_port.all_allowed_macs),
+                         m_install.call_count)
+
+    def test_delete_all_port_flows_egress_direct_allowed_address_pairs(self):
+        port_dict = {
+            'device': 'port-id',
+            'security_groups': [1],
+            'allowed_address_pairs': [
+                {'mac_address': '00:00:00:00:00:11',
+                 'ip_address': '192.168.0.1'}]}
+        of_port = create_ofport(port_dict)
+        self.firewall.sg_port_map.ports[of_port.id] = of_port
+        port = self.firewall.get_or_create_ofport(port_dict)
+
+        with mock.patch.object(
+                self.firewall,
+                'delete_accepted_egress_direct_flow') as m_delete:
+            self.firewall.delete_all_port_flows(port)
+
+        expected_calls = [mock.call(mac_addr, port.vlan_tag)
+                          for mac_addr in port.all_allowed_macs]
+        m_delete.assert_has_calls(expected_calls, any_order=True)
+        self.assertEqual(len(port.all_allowed_macs), m_delete.call_count)
+
     def test_prepare_port_filter_initialized_port(self):
         port_dict = {'device': 'port-id',
                      'security_groups': [1]}

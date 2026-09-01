@@ -1282,9 +1282,17 @@ class OVSFirewallDriver(firewall.FirewallDriver):
 
         tunnel_direct_info = {"network_type": port.network_type,
                               "physical_network": port.physical_network}
-        self.install_accepted_egress_direct_flow(
-            port.mac, port.vlan_tag, port.ofport,
-            tunnel_direct_info=tunnel_direct_info)
+        # Install the direct flows for every MAC the port may legitimately
+        # use (fixed MAC and allowed address pair MACs), the same set the
+        # ingress and anti-spoofing flows are built from. With only the
+        # fixed MAC installed, unicast destined to an allowed address pair
+        # MAC of a port on the same hypervisor matches the lower-priority
+        # dl_src output-to-patch flow instead, and the physical bridge
+        # drops it as a hairpin (learned port is input port).
+        for mac_addr in port.all_allowed_macs:
+            self.install_accepted_egress_direct_flow(
+                mac_addr, port.vlan_tag, port.ofport,
+                tunnel_direct_info=tunnel_direct_info)
 
     def install_accepted_egress_direct_flow(self, mac, vlan_tag, dst_port,
                                             tunnel_direct_info=None):
@@ -1660,9 +1668,8 @@ class OVSFirewallDriver(firewall.FirewallDriver):
             self.delete_physical_direct_flow(mac_addr, port.segment_id)
             self._delete_flows(table=ovs_consts.ACCEPT_OR_INGRESS_TABLE,
                                dl_dst=mac_addr, reg_net=port.vlan_tag)
-
-        self.delete_accepted_egress_direct_flow(
-            port.mac, port.vlan_tag)
+            self.delete_accepted_egress_direct_flow(
+                mac_addr, port.vlan_tag)
         self._delete_flows(table=ovs_consts.TRANSIENT_TABLE,
                            in_port=port.ofport)
         self._delete_flows(reg_port=port.ofport)
