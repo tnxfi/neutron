@@ -55,7 +55,12 @@ class OVSIntegrationBridge(ovs_bridge.OVSAgentBridge,
                            br_dvr_process.OVSDVRInterfaceMixin):
     """openvswitch agent br-int specific logic."""
 
-    of_tables = constants.INT_BR_ALL_TABLES
+    # neutron-lib's list lacks the table that explicitly_egress_direct fills
+    # with per-port flows. Without it the stale-flow cleanup after an agent
+    # restart leaves those flows behind, in force, under their old cookie.
+    of_tables = constants.INT_BR_ALL_TABLES + tuple(
+        t for t in (constants.ACCEPTED_EGRESS_TRAFFIC_NORMAL_TABLE,)
+        if t not in constants.INT_BR_ALL_TABLES)
 
     def setup_default_table(self, enable_openflow_dhcp=False,
                             enable_dhcpv6=False):

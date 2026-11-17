@@ -967,12 +967,35 @@ class OVSFirewallDriver(firewall.FirewallDriver):
                                dl_dst=mac,
                                vlan_tci=ovs_consts.FLAT_VLAN_TCI)
 
+    def _delete_flows_of_removed_macs(self, port):
+        """Remove the flows of MACs that are no longer allowed on the port.
+
+        When an allowed address pair is taken off a port, the port object
+        handed to delete_all_port_flows as the old one is the same object
+        and holds the new pairs already, so the flows keyed on the removed
+        MAC stayed: the ingress steering in TRANSIENT_TABLE and
+        ACCEPT_OR_INGRESS_TABLE and, with explicitly_egress_direct, the
+        direct flows in ACCEPTED_EGRESS_TRAFFIC_NORMAL_TABLE, which went on
+        sending frames for that MAC to this port.
+        """
+        macs = set(port.all_allowed_macs)
+        for mac_addr in getattr(port, 'flow_macs', macs) - macs:
+            self._delete_flows(table=ovs_consts.TRANSIENT_TABLE,
+                               dl_dst=mac_addr,
+                               dl_vlan=port.vlan_tag)
+            self.delete_physical_direct_flow(mac_addr, port.segment_id)
+            self._delete_flows(table=ovs_consts.ACCEPT_OR_INGRESS_TABLE,
+                               dl_dst=mac_addr, reg_net=port.vlan_tag)
+            self.delete_accepted_egress_direct_flow(mac_addr, port.vlan_tag)
+        port.flow_macs = macs
+
     def initialize_port_flows(self, port):
         """Set base flows for port
 
         :param port: OFPort instance
 
         """
+        self._delete_flows_of_removed_macs(port)
         # Identify egress flow
         self._add_flow(
             table=ovs_consts.TRANSIENT_TABLE,
@@ -1092,6 +1115,9 @@ class OVSFirewallDriver(firewall.FirewallDriver):
         self.install_accepted_egress_direct_flow(
             ovs_port.vif_mac, vlan_tag, ovs_port.ofport,
             tunnel_direct_info=tunnel_direct_info)
+        # The port may carry MACs neutron does not know: its network takes
+        # NORMAL again for unknown unicast on this host.
+        self._refresh_egress_direct_flows(vlan_tag)
 
     def _remove_egress_no_port_security(self, port_id):
         try:
@@ -1112,6 +1138,7 @@ class OVSFirewallDriver(firewall.FirewallDriver):
             ovs_port.vif_mac, vlan_tag)
 
         del self.sg_port_map.unfiltered[port_id]
+        self._refresh_egress_direct_flows(vlan_tag)
 
     def _initialize_egress(self, port):
         """Identify egress traffic and send it to egress base"""
@@ -1319,6 +1346,16 @@ class OVSFirewallDriver(firewall.FirewallDriver):
             actions=f'strip_vlan,output:{dst_port:d}'
         )
 
+        # The flow below sends every unicast frame that has no direct flow
+        # above to the network's patch port. A MAC behind a port without
+        # port security has none, as neutron does not know it, and the
+        # frame for it would leave the host and be dropped as a hairpin on
+        # the physical bridge. A network that holds such a port on this
+        # host therefore keeps NORMAL, which learns and floods, for the
+        # unicast traffic of its ports.
+        if self._vlan_has_unfiltered_port(vlan_tag):
+            return
+
         # The former flow may not match, that means the destination port is
         # not in this host. So, we direct the packet to mapped bridge(s).
         if tunnel_direct_info:
@@ -1354,6 +1391,37 @@ class OVSFirewallDriver(firewall.FirewallDriver):
                         vlan_tag,
                         patch_ofport)
                 )
+
+    def _vlan_has_unfiltered_port(self, vlan_tag):
+        return any(tag == vlan_tag
+                   for _port, tag in self.sg_port_map.unfiltered.values())
+
+    def _refresh_egress_direct_flows(self, vlan_tag):
+        """Rebuild the flows to the patch port of one network's ports.
+
+        Called when a port without port security joins or leaves the
+        network on this host. With one present the flows are removed, so
+        that unknown unicast takes NORMAL; with none left they are
+        installed again.
+        """
+        if not cfg.CONF.AGENT.explicitly_egress_direct:
+            return
+        keep_normal = self._vlan_has_unfiltered_port(vlan_tag)
+        for port in list(self.sg_port_map.ports.values()):
+            if port.vlan_tag != vlan_tag:
+                continue
+            tunnel_direct_info = {"network_type": port.network_type,
+                                  "physical_network": port.physical_network}
+            for mac_addr in port.all_allowed_macs:
+                if keep_normal:
+                    self._delete_flows(
+                        table=ovs_consts.ACCEPTED_EGRESS_TRAFFIC_NORMAL_TABLE,
+                        dl_src=mac_addr,
+                        reg_net=vlan_tag)
+                else:
+                    self.install_accepted_egress_direct_flow(
+                        mac_addr, vlan_tag, port.ofport,
+                        tunnel_direct_info=tunnel_direct_info)
 
     def delete_accepted_egress_direct_flow(self, mac, vlan_tag):
         self._delete_flows(
